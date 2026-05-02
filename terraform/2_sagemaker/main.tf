@@ -16,6 +16,10 @@ provider "aws" {
   region = var.aws_region
 }
 
+locals {
+  sagemaker_image_uri = var.sagemaker_image_uri != "" ? var.sagemaker_image_uri : "763104351884.dkr.ecr.${var.aws_region}.amazonaws.com/huggingface-pytorch-inference:1.13.1-transformers4.26.0-cpu-py39-ubuntu20.04"
+}
+
 # Data source for current caller identity
 data "aws_caller_identity" "current" {}
 
@@ -48,7 +52,7 @@ resource "aws_sagemaker_model" "embedding_model" {
   execution_role_arn = aws_iam_role.sagemaker_role.arn
 
   primary_container {
-    image = var.sagemaker_image_uri
+    image = local.sagemaker_image_uri
     environment = {
       HF_MODEL_ID = var.embedding_model_name
       HF_TASK     = "feature-extraction"

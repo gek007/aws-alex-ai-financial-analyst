@@ -6,7 +6,7 @@ variable "aws_region" {
 variable "sagemaker_image_uri" {
   description = "URI of the SageMaker container image"
   type        = string
-  default     = "763104351884.dkr.ecr.us-east-1.amazonaws.com/huggingface-pytorch-inference:1.13.1-transformers4.26.0-cpu-py39-ubuntu20.04"
+  default     = ""
 }
 
 variable "embedding_model_name" {
