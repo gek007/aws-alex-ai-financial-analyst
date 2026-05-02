@@ -41,11 +41,11 @@ graph LR
     Lambda -->|Store| S3V[(S3 Vectors<br/>90% Cheaper!)]
     User -->|Search| S3V
     
-    style AR fill:#FF9900
-    style Bedrock fill:#FF9900
-    style S3V fill:#90EE90
-    style Schedule fill:#9333EA
-    style SchedLambda fill:#FF9900
+    style AR fill:#D8E4EC,stroke:#6E8A9E,stroke-width:2px,color:#1A2F3D
+    style Bedrock fill:#E6E0DC,stroke:#8B7F78,stroke-width:2px,color:#2D2824
+    style S3V fill:#E3EEF5,stroke:#7A99B3,stroke-width:2px,color:#1E3347
+    style Schedule fill:#EBE6F0,stroke:#9A8AAE,stroke-width:2px,color:#2F2640
+    style SchedLambda fill:#D8E4EC,stroke:#6E8A9E,stroke-width:2px,color:#1A2F3D
 ```
 
 ## Step 0: Request Access to Bedrock Models

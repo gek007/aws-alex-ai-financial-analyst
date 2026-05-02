@@ -178,7 +178,7 @@ graph LR
     D -->|Embeddings| C
     C --> E[S3 Vectors]
     
-    style E fill:#90EE90,stroke:#228B22,stroke-width:3px
+    style E fill:#E3EEF5,stroke:#7A99B3,stroke-width:2px,color:#1E3347
 ```
 
 ## Cost Comparison
