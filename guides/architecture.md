@@ -39,11 +39,11 @@ graph TB
     AppRunner -.->|Pull Image| ECR
     
     %% Styling
-    classDef aws fill:#FF9900,stroke:#232F3E,stroke-width:2px,color:#fff
-    classDef ai fill:#10B981,stroke:#047857,stroke-width:2px,color:#fff
-    classDef storage fill:#3B82F6,stroke:#1E40AF,stroke-width:2px,color:#fff
-    classDef highlight fill:#90EE90,stroke:#228B22,stroke-width:3px,color:#000
-    classDef scheduler fill:#9333EA,stroke:#6B21A8,stroke-width:2px,color:#fff
+    classDef aws fill:#80C7E0,stroke:#40596B,stroke-width:2px,color:#252525
+    classDef ai fill:#AED9C5,stroke:#4C9085,stroke-width:2px,color:#22301E
+    classDef storage fill:#BCDEFA,stroke:#356184,stroke-width:2px,color:#223344
+    classDef highlight fill:#FFD6A5,stroke:#E8AB6A,stroke-width:3px,color:#444
+    classDef scheduler fill:#B5B8E6,stroke:#6C72A3,stroke-width:2px,color:#232944
     
     class APIGW,Lambda,AppRunner,SageMaker,ECR,SchedulerLambda aws
     class Bedrock ai
