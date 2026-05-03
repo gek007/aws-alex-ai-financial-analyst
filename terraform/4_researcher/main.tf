@@ -123,9 +123,20 @@ resource "aws_iam_role_policy" "app_runner_instance_bedrock_access" {
   })
 }
 
+# Single-instance cap so async /research jobs (in-memory job_id) always poll the same replica.
+# App Runner requires min_size and max_size to be at least 1.
+resource "aws_apprunner_auto_scaling_configuration_version" "researcher" {
+  auto_scaling_configuration_name = "alex-researcher-as"
+  max_concurrency                 = 50
+  min_size                        = 1
+  max_size                        = 1
+}
+
 # App Runner service
 resource "aws_apprunner_service" "researcher" {
   service_name = "alex-researcher"
+
+  auto_scaling_configuration_arn = aws_apprunner_auto_scaling_configuration_version.researcher.arn
   
   source_configuration {
     auto_deployments_enabled = false

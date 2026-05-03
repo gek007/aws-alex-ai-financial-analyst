@@ -32,9 +32,23 @@ def handler(event, context):
             headers={'Content-Type': 'application/json'}
         )
         
-        with urllib.request.urlopen(req, timeout=180) as response:
+        with urllib.request.urlopen(req, timeout=60) as response:
+            status_code = response.getcode()
             result = response.read().decode('utf-8')
-            print(f"Research triggered successfully: {result}")
+            if status_code == 202:
+                try:
+                    parsed = json.loads(result) if result else None
+                except json.JSONDecodeError:
+                    parsed = result
+                print(f"Research job accepted: {result}")
+                return {
+                    'statusCode': 200,
+                    'body': json.dumps({
+                        'message': 'Research job started (poll /research/jobs/{job_id} for result)',
+                        'apprunner_response': parsed,
+                    })
+                }
+            print(f"Research completed: {result}")
             return {
                 'statusCode': 200,
                 'body': json.dumps({

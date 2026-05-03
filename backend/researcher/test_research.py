@@ -7,6 +7,7 @@ Cross-platform script for Mac/Windows/Linux.
 import subprocess
 import sys
 import json
+import time
 import requests
 import argparse
 
@@ -76,21 +77,44 @@ def test_research(topic=None):
     
     # Call research endpoint
     print(f"\n🔬 Generating research for: {display_topic}")
-    print("   This will take 20-30 seconds as the agent researches and analyzes...")
+    print("   The service runs research in the background; total time is often 2–6 minutes.")
     
     try:
         research_url = f"https://{service_url}/research"
         # Only include topic if user passed one (omit for DEFAULT_RESEARCH_PROMPT on server)
         payload = {"topic": topic} if topic else {}
-        response = requests.post(
-            research_url,
-            json=payload,
-            timeout=180  # Give it 3 minutes for research
-        )
+        # Async job: POST returns quickly (App Runner HTTP limit is ~120s total).
+        response = requests.post(research_url, json=payload, timeout=60)
         response.raise_for_status()
-        
-        # Parse and display the result
-        result = response.json()
+
+        if response.status_code == 202:
+            job = response.json()
+            job_id = job.get("job_id")
+            if not job_id:
+                print(f"❌ Unexpected 202 body: {job}")
+                sys.exit(1)
+            status_url = f"https://{service_url}/research/jobs/{job_id}"
+            print("   Job accepted; waiting for research (often 2–6 minutes)...")
+            deadline = time.monotonic() + 600
+            while time.monotonic() < deadline:
+                time.sleep(3)
+                st_resp = requests.get(status_url, timeout=30)
+                st_resp.raise_for_status()
+                state = st_resp.json()
+                st = state.get("status")
+                if st == "completed":
+                    result = state.get("result", "")
+                    break
+                if st == "failed":
+                    err = state.get("error", "unknown error")
+                    print(f"❌ Research job failed: {err}")
+                    sys.exit(1)
+            else:
+                print("❌ Timed out waiting for research job (10 minutes).")
+                sys.exit(1)
+        else:
+            # sync mode or older server: plain research text as JSON string
+            result = response.json()
         
         print("\n✅ Research generated successfully!")
         print("\n" + "="*60)

@@ -2,15 +2,18 @@
 Alex Researcher Service - Investment Advice Agent
 """
 
+import asyncio
 import logging
 import os
+import uuid
 from datetime import UTC, datetime
-from typing import Optional
+from typing import Any, Optional
 
 from agents import Agent, Runner, trace
 from agents.extensions.models.litellm_model import LitellmModel
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 # Suppress LiteLLM warnings about optional dependencies
@@ -25,6 +28,47 @@ from tools import ingest_financial_document
 load_dotenv(override=True)
 
 app = FastAPI(title="Alex Researcher Service")
+
+# In-process job store so POST /research can return within App Runner's 120s HTTP limit.
+# See: https://docs.aws.amazon.com/apprunner/latest/dg/develop.html — 120s total request timeout.
+_MAX_JOBS = 128
+_jobs: dict[str, dict[str, Any]] = {}
+_jobs_lock = asyncio.Lock()
+
+
+def _evict_terminal_jobs_unlocked() -> None:
+    if len(_jobs) <= _MAX_JOBS:
+        return
+    excess = len(_jobs) - _MAX_JOBS
+    terminal = [
+        jid
+        for jid, meta in _jobs.items()
+        if meta.get("status") in ("completed", "failed")
+    ]
+    for jid in terminal[:excess]:
+        _jobs.pop(jid, None)
+
+
+async def _run_research_job(job_id: str, topic: Optional[str]) -> None:
+    async with _jobs_lock:
+        meta = _jobs.get(job_id)
+        if meta is None:
+            return
+        meta["status"] = "running"
+    try:
+        output = await run_research_agent(topic)
+        async with _jobs_lock:
+            m = _jobs.get(job_id)
+            if m is not None:
+                m["status"] = "completed"
+                m["result"] = output
+    except Exception as e:
+        logging.exception("Research job %s failed", job_id)
+        async with _jobs_lock:
+            m = _jobs.get(job_id)
+            if m is not None:
+                m["status"] = "failed"
+                m["error"] = str(e)
 
 
 # Request model
@@ -41,20 +85,16 @@ async def run_research_agent(topic: str = None) -> str:
     else:
         query = DEFAULT_RESEARCH_PROMPT
 
-    # Please override these variables with the region you are using
-    # Other choices: us-west-2 (for OpenAI OSS models) and eu-central-1
-    REGION = "us-east-1"
+    # eu-west-1 matches the App Runner service region; Nova Pro supports tools/MCP.
+    # OSS 120B is only available in us-west-2 — using it with us-east-1 causes silent failures.
+    REGION = "eu-west-1"
     os.environ["AWS_REGION_NAME"] = REGION  # LiteLLM's preferred variable
     os.environ["AWS_REGION"] = REGION  # Boto3 standard
     os.environ["AWS_DEFAULT_REGION"] = REGION  # Fallback
 
-    # Please override this variable with the model you are using
-    # Common choices: bedrock/eu.amazon.nova-pro-v1:0 for EU and bedrock/us.amazon.nova-pro-v1:0 for US
-    # or bedrock/amazon.nova-pro-v1:0 if you are not using inference profiles
-    # bedrock/openai.gpt-oss-120b-1:0 for OpenAI OSS models
-    # bedrock/converse/us.anthropic.claude-sonnet-4-20250514-v1:0 for Claude Sonnet 4
-    # NOTE that nova-pro is needed to support tools and MCP servers; nova-lite is not enough - thank you Yuelin L.!
-    MODEL = "bedrock/openai.gpt-oss-120b-1:0"
+    # eu.amazon.nova-pro-v1:0 — EU inference profile, supports tool calling and MCP servers.
+    # nova-lite is NOT acceptable here as it does not support tool calling.
+    MODEL = "bedrock/eu.amazon.nova-pro-v1:0"
     model = LitellmModel(model=MODEL)
 
     # Create and run the agent with MCP server
@@ -68,8 +108,8 @@ async def run_research_agent(topic: str = None) -> str:
                 mcp_servers=[playwright_mcp],
             )
 
-            # MCP browsing + ingest uses several turns per page; 15 is often too low.
-            result = await Runner.run(agent, input=query, max_turns=35)
+            # Each Playwright navigate/snapshot + model reply counts as a turn.
+            result = await Runner.run(agent, input=query, max_turns=30)
 
     return result.final_output
 
@@ -85,51 +125,78 @@ async def root():
 
 
 @app.post("/research")
-async def research(request: ResearchRequest) -> str:
+async def research(
+    request: ResearchRequest,
+    sync: bool = Query(
+        False,
+        description="If true, block until research completes (hits App Runner ~120s HTTP limit).",
+    ),
+):
     """
     Generate investment research and advice.
 
-    The agent will:
-    1. Browse current financial websites for data
-    2. Analyze the information found
-    3. Store the analysis in the knowledge base
+    Default (async): returns 202 + job_id immediately. Poll GET /research/jobs/{job_id}
+    until status is completed or failed. Required on AWS App Runner because the load
+    balancer enforces a 120s timeout on the entire request.
 
-    If no topic is provided, the agent will pick a trending topic.
+    sync=true: returns the research text in one response (for local dev only).
     """
-    try:
-        response = await run_research_agent(request.topic)
-        return response
-    except Exception as e:
-        print(f"Error in research endpoint: {e}")
-        import traceback
+    if sync:
+        try:
+            return await run_research_agent(request.topic)
+        except Exception as e:
+            logging.exception("Error in research endpoint (sync)")
+            raise HTTPException(status_code=500, detail=str(e))
 
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+    job_id = str(uuid.uuid4())
+    async with _jobs_lock:
+        _evict_terminal_jobs_unlocked()
+        _jobs[job_id] = {
+            "status": "pending",
+            "created": datetime.now(UTC).isoformat(),
+        }
+    asyncio.create_task(_run_research_job(job_id, request.topic))
+    return JSONResponse(
+        status_code=202,
+        content={
+            "job_id": job_id,
+            "status": "pending",
+            "message": "Poll GET /research/jobs/{job_id} until status is completed or failed.",
+        },
+    )
+
+
+@app.get("/research/jobs/{job_id}")
+async def research_job_status(job_id: str):
+    """Status and result for an async research job started via POST /research."""
+    async with _jobs_lock:
+        job = _jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Unknown job_id")
+    return job
 
 
 @app.get("/research/auto")
 async def research_auto():
     """
-    Automated research endpoint for scheduled runs.
-    Picks a trending topic automatically and generates research.
-    Used by EventBridge Scheduler for periodic research updates.
+    Automated research (scheduled runs). Returns 202 + job_id; poll GET /research/jobs/{job_id}.
     """
-    try:
-        # Always use agent's choice for automated runs
-        response = await run_research_agent(topic=None)
-        return {
-            "status": "success",
-            "timestamp": datetime.now(UTC).isoformat(),
-            "message": "Automated research completed",
-            "preview": response[:200] + "..." if len(response) > 200 else response,
+    job_id = str(uuid.uuid4())
+    async with _jobs_lock:
+        _evict_terminal_jobs_unlocked()
+        _jobs[job_id] = {
+            "status": "pending",
+            "created": datetime.now(UTC).isoformat(),
         }
-    except Exception as e:
-        print(f"Error in automated research: {e}")
-        return {
-            "status": "error",
-            "timestamp": datetime.now(UTC).isoformat(),
-            "error": str(e),
-        }
+    asyncio.create_task(_run_research_job(job_id, None))
+    return JSONResponse(
+        status_code=202,
+        content={
+            "status": "accepted",
+            "job_id": job_id,
+            "message": "Poll GET /research/jobs/{job_id} until status is completed or failed.",
+        },
+    )
 
 
 @app.get("/health")
@@ -153,7 +220,7 @@ async def health():
         "timestamp": datetime.now(UTC).isoformat(),
         "debug_container": container_indicators,
         "aws_region": os.environ.get("AWS_DEFAULT_REGION", "not set"),
-        "bedrock_model": "bedrock/openai.gpt-oss-120b-1:0",
+        "bedrock_model": "bedrock/eu.amazon.nova-pro-v1:0",
     }
 
 
@@ -172,23 +239,21 @@ async def test_bedrock():
         session = boto3.Session()
         actual_region = session.region_name
 
-        # Try to create Bedrock client explicitly in us-west-2
         client = boto3.client("bedrock-runtime", region_name="eu-west-1")
 
-        # Debug: Try to list models to verify connection
+        # Debug: list available Nova models in eu-west-1
         try:
             bedrock_client = boto3.client("bedrock", region_name="eu-west-1")
             models = bedrock_client.list_foundation_models()
-            openai_models = [
+            nova_models = [
                 m["modelId"]
                 for m in models["modelSummaries"]
-                if "openai" in m["modelId"].lower()
+                if "nova" in m["modelId"].lower()
             ]
         except Exception as list_error:
-            openai_models = f"Error listing: {str(list_error)}"
+            nova_models = f"Error listing: {str(list_error)}"
 
-        # Try basic model invocation with Nova Pro
-        model = LitellmModel(model="bedrock/openai.gpt-oss-120b-1:0")
+        model = LitellmModel(model="bedrock/eu.amazon.nova-pro-v1:0")
 
         agent = Agent(
             name="Test Agent",
@@ -207,7 +272,7 @@ async def test_bedrock():
             "response": result.final_output,
             "debug": {
                 "boto3_session_region": actual_region,
-                "available_openai_models": openai_models,
+                "available_nova_models": nova_models,
             },
         }
     except Exception as e:
