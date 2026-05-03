@@ -2,22 +2,22 @@
 Alex Researcher Service - Investment Advice Agent
 """
 
-import os
 import logging
-from datetime import datetime, UTC
+import os
+from datetime import UTC, datetime
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from dotenv import load_dotenv
 from agents import Agent, Runner, trace
 from agents.extensions.models.litellm_model import LitellmModel
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
 # Suppress LiteLLM warnings about optional dependencies
 logging.getLogger("LiteLLM").setLevel(logging.CRITICAL)
 
 # Import from our modules
-from context import get_agent_instructions, DEFAULT_RESEARCH_PROMPT
+from context import DEFAULT_RESEARCH_PROMPT, get_agent_instructions
 from mcp_servers import create_playwright_mcp_server
 from tools import ingest_financial_document
 
@@ -54,7 +54,7 @@ async def run_research_agent(topic: str = None) -> str:
     # bedrock/openai.gpt-oss-120b-1:0 for OpenAI OSS models
     # bedrock/converse/us.anthropic.claude-sonnet-4-20250514-v1:0 for Claude Sonnet 4
     # NOTE that nova-pro is needed to support tools and MCP servers; nova-lite is not enough - thank you Yuelin L.!
-    MODEL = "bedrock/us.amazon.nova-pro-v1:0"
+    MODEL = "bedrock/openai.gpt-oss-120b-1:0"
     model = LitellmModel(model=MODEL)
 
     # Create and run the agent with MCP server
@@ -68,7 +68,8 @@ async def run_research_agent(topic: str = None) -> str:
                 mcp_servers=[playwright_mcp],
             )
 
-            result = await Runner.run(agent, input=query, max_turns=15)
+            # MCP browsing + ingest uses several turns per page; 15 is often too low.
+            result = await Runner.run(agent, input=query, max_turns=35)
 
     return result.final_output
 
@@ -124,7 +125,11 @@ async def research_auto():
         }
     except Exception as e:
         print(f"Error in automated research: {e}")
-        return {"status": "error", "timestamp": datetime.now(UTC).isoformat(), "error": str(e)}
+        return {
+            "status": "error",
+            "timestamp": datetime.now(UTC).isoformat(),
+            "error": str(e),
+        }
 
 
 @app.get("/health")
@@ -142,11 +147,13 @@ async def health():
     return {
         "service": "Alex Researcher",
         "status": "healthy",
-        "alex_api_configured": bool(os.getenv("ALEX_API_ENDPOINT") and os.getenv("ALEX_API_KEY")),
+        "alex_api_configured": bool(
+            os.getenv("ALEX_API_ENDPOINT") and os.getenv("ALEX_API_KEY")
+        ),
         "timestamp": datetime.now(UTC).isoformat(),
         "debug_container": container_indicators,
         "aws_region": os.environ.get("AWS_DEFAULT_REGION", "not set"),
-        "bedrock_model": "bedrock/amazon.nova-pro-v1:0",
+        "bedrock_model": "bedrock/openai.gpt-oss-120b-1:0",
     }
 
 
@@ -157,29 +164,31 @@ async def test_bedrock():
         import boto3
 
         # Set ALL region environment variables
-        os.environ["AWS_REGION_NAME"] = "us-east-1"
-        os.environ["AWS_REGION"] = "us-east-1"
-        os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
+        os.environ["AWS_REGION_NAME"] = "eu-west-1"
+        os.environ["AWS_REGION"] = "eu-west-1"
+        os.environ["AWS_DEFAULT_REGION"] = "eu-west-1"
 
         # Debug: Check what region boto3 is actually using
         session = boto3.Session()
         actual_region = session.region_name
 
         # Try to create Bedrock client explicitly in us-west-2
-        client = boto3.client("bedrock-runtime", region_name="us-west-2")
+        client = boto3.client("bedrock-runtime", region_name="eu-west-1")
 
         # Debug: Try to list models to verify connection
         try:
-            bedrock_client = boto3.client("bedrock", region_name="us-west-2")
+            bedrock_client = boto3.client("bedrock", region_name="eu-west-1")
             models = bedrock_client.list_foundation_models()
             openai_models = [
-                m["modelId"] for m in models["modelSummaries"] if "openai" in m["modelId"].lower()
+                m["modelId"]
+                for m in models["modelSummaries"]
+                if "openai" in m["modelId"].lower()
             ]
         except Exception as list_error:
             openai_models = f"Error listing: {str(list_error)}"
 
         # Try basic model invocation with Nova Pro
-        model = LitellmModel(model="bedrock/amazon.nova-pro-v1:0")
+        model = LitellmModel(model="bedrock/openai.gpt-oss-120b-1:0")
 
         agent = Agent(
             name="Test Agent",
@@ -187,7 +196,9 @@ async def test_bedrock():
             model=model,
         )
 
-        result = await Runner.run(agent, input="Say hello in 5 words or less", max_turns=1)
+        result = await Runner.run(
+            agent, input="Say hello in 5 words or less", max_turns=1
+        )
 
         return {
             "status": "success",
@@ -208,7 +219,9 @@ async def test_bedrock():
             "type": type(e).__name__,
             "traceback": traceback.format_exc(),
             "debug": {
-                "boto3_session_region": session.region_name if "session" in locals() else "unknown",
+                "boto3_session_region": session.region_name
+                if "session" in locals()
+                else "unknown",
                 "env_vars": {
                     "AWS_REGION_NAME": os.environ.get("AWS_REGION_NAME"),
                     "AWS_REGION": os.environ.get("AWS_REGION"),
